@@ -22,7 +22,7 @@ from lib.cuckoo.common.exceptions import CuckooDatabaseError, CuckooDependencyEr
 from lib.cuckoo.common.integrations.parse_pe import PortableExecutable
 from lib.cuckoo.common.objects import PCAP, URL, File, Static
 from lib.cuckoo.common.path_utils import path_delete, path_exists
-from lib.cuckoo.common.utils import Singleton, SuperLock, classlock, create_folder, get_options
+from lib.cuckoo.common.utils import Singleton, SuperLock, classlock, create_folder
 
 try:
     from sqlalchemy import (
@@ -47,7 +47,7 @@ try:
 
     Base = declarative_base()
 except ImportError:
-    raise CuckooDependencyError("Unable to import sqlalchemy (install with `pip3 install sqlalchemy`)")
+    raise CuckooDependencyError("Unable to import sqlalchemy (install with `poetry run pip install sqlalchemy`)")
 
 
 sandbox_packages = (
@@ -615,7 +615,9 @@ class Database(object, metaclass=Singleton):
             elif connection_string.startswith("postgres"):
                 # Disabling SSL mode to avoid some errors using sqlalchemy and multiprocesing.
                 # See: http://www.postgresql.org/docs/9.0/static/libpq-ssl.html#LIBPQ-SSL-SSLMODE-STATEMENTS
-                self.engine = create_engine(connection_string, connect_args={"sslmode": "disable"}, pool_pre_ping=True)
+                self.engine = create_engine(
+                    connection_string, connect_args={"sslmode": self.cfg.database.psql_ssl_mode}, pool_pre_ping=True
+                )
             else:
                 self.engine = create_engine(connection_string)
         except ImportError as e:
@@ -1640,8 +1642,12 @@ class Database(object, metaclass=Singleton):
             file_path = file_path.encode()
 
         if not package:
-            # Checking original file as some filetypes doesn't require demux
-            package, _ = self._identify_aux_func(file_path, package)
+            if "file=" in options:
+                # set zip as package when specifying file= in options
+                package = "zip"
+            else:
+                # Checking original file as some filetypes doesn't require demux
+                package, _ = self._identify_aux_func(file_path, package)
 
         # extract files from the (potential) archive
         extracted_files = demux_sample(file_path, package, options)
@@ -1650,17 +1656,6 @@ class Database(object, metaclass=Singleton):
             sample_parent_id = self.register_sample(File(file_path), source_url=source_url)
             if conf.cuckoo.delete_archive:
                 path_delete(file_path.decode())
-
-        # Check for 'file' option indicating supporting files needed for upload; otherwise create task for each file
-        opts = get_options(options)
-        if "file" in opts:
-            runfile = opts["file"].lower()
-            if isinstance(runfile, str):
-                runfile = runfile.encode()
-            for xfile in extracted_files:
-                if runfile in xfile.lower():
-                    extracted_files = [xfile]
-                    break
 
         # create tasks for each file in the archive
         for file in extracted_files:
@@ -1732,6 +1727,7 @@ class Database(object, metaclass=Singleton):
                     user_id=user_id,
                     username=username,
                 )
+                package = None
             if task_id:
                 task_ids.append(task_id)
 
@@ -1907,6 +1903,8 @@ class Database(object, metaclass=Singleton):
             timeout = 0
         if not priority:
             priority = 1
+        if not package:
+            package = web_conf.url_analysis.package
 
         return self.add(
             URL(url),
@@ -2198,7 +2196,7 @@ class Database(object, metaclass=Singleton):
                 search = search.order_by(Task.added_on.desc())
 
             tasks = search.limit(limit).offset(offset).all()
-            # session.expunge_all()
+            session.expunge_all()
             return tasks
         except RuntimeError as e:
             # RuntimeError: number of values in row (1) differ from number of column processors (62)
@@ -2450,9 +2448,31 @@ class Database(object, metaclass=Singleton):
         return sample
 
     @classlock
-    def sample_path_by_hash(self, sample_hash):
+    def sample_still_used(self, sample_hash: str, task_id: int):
+        """Retrieve information if sample is used by another task(s).
+        @param hash: md5/sha1/sha256/sha256.
+        @param task_id: task_id
+        @return: bool
+        """
+        session = self.Session()
+        db_sample = (
+            session.query(Sample)
+            .options(joinedload("tasks"))
+            .filter(Sample.sha256 == sample_hash)
+            .filter(Task.id != task_id)
+            .filter(Sample.id == Task.sample_id)
+            .filter(Task.status.in_((TASK_PENDING, TASK_RUNNING, TASK_DISTRIBUTED)))
+            .first()
+        )
+        still_used = bool(db_sample)
+        session.close()
+        return still_used
+
+    @classlock
+    def sample_path_by_hash(self, sample_hash: str = False, task_id: int = False):
         """Retrieve information on a sample location by given hash.
         @param hash: md5/sha1/sha256/sha256.
+        @param task_id: task_id
         @return: samples path(s) as list.
         """
         sizes = {
@@ -2475,18 +2495,44 @@ class Database(object, metaclass=Singleton):
             "procdump": "procdump",
         }
 
+        if task_id:
+            file_path = os.path.join(CUCKOO_ROOT, "storage", "analyses", str(task_id), "binary")
+            if path_exists(file_path):
+                return [file_path]
+
+        session = False
+        # binary also not stored in binaries, perform hash lookup
+        if task_id and not sample_hash:
+            session = self.Session()
+            db_sample = (
+                session.query(Sample)
+                .options(joinedload("tasks"))
+                .filter(Task.id == task_id)
+                .filter(Sample.id == Task.sample_id)
+                .first()
+            )
+            if db_sample:
+                path = os.path.join(CUCKOO_ROOT, "storage", "binaries", db_sample.sha256)
+                if path_exists(path):
+                    return [path]
+
+                sample_hash = db_sample.sha256
+
+        if not sample_hash:
+            return []
+
         query_filter = sizes.get(len(sample_hash), "")
         sample = []
         # check storage/binaries
         if query_filter:
-            session = self.Session()
             try:
-
+                if not session:
+                    session = self.Session()
                 db_sample = session.query(Sample).filter(query_filter == sample_hash).first()
                 if db_sample is not None:
-                    file_path = os.path.join(CUCKOO_ROOT, "storage", "binaries", db_sample.sha256)
-                    if path_exists(file_path):
-                        sample = [file_path]
+                    path = os.path.join(CUCKOO_ROOT, "storage", "binaries", db_sample.sha256)
+                    if path_exists(path):
+                        sample = [path]
 
                 if not sample:
                     if repconf.mongodb.enabled:

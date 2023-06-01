@@ -1,7 +1,6 @@
 #!/bin/bash
 
-# Copyright (C) 2011-2023 DoomedRaven.
-# This file is part of Tools - https://github.com/doomedraven/Tools
+# Copyright (C) 2011-2023 doomedraven.
 # See the file 'LICENSE.md' for copying permission.
 # https://www.doomedraven.com/2016/05/kvm.html
 # https://www.doomedraven.com/2020/04/how-to-create-virtual-machine-with-virt.html
@@ -397,9 +396,9 @@ function install_libvirt() {
     # http://ask.xmodulo.com/compile-virt-manager-debian-ubuntu.html
     #rm -r /usr/local/lib/python2.7/dist-packages/libvirt*
 
-    if [ ! -f /etc/apt/preferences.d/doomedraven ]; then
+    if [ ! -f /etc/apt/preferences.d/cape ]; then
     # set to hold to avoid side problems
-        cat >> /etc/apt/preferences.d/doomedraven << EOH
+        cat >> /etc/apt/preferences.d/cape << EOH
 Package: libvirt-bin
 Pin: release *
 Pin-Priority: -1
@@ -456,8 +455,6 @@ EOH
     cd libvirt-$libvirt_version || return
     if [ "$OS" = "Linux" ]; then
         aptitude install -f mlocate iptables python3-dev unzip numad libglib2.0-dev libsdl1.2-dev lvm2 python3-pip ebtables libosinfo-1.0-dev libnl-3-dev libnl-route-3-dev libyajl-dev xsltproc libdevmapper-dev libpciaccess-dev dnsmasq dmidecode librbd-dev libtirpc-dev -y 2>/dev/null
-
-         # see https://github.com/doomedraven/Tools/issues/100
         install_apparmor
 
         pip3 install ipaddr ninja meson flake8 -U

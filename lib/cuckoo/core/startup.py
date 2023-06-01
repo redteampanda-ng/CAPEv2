@@ -4,6 +4,7 @@
 
 import copy
 import getpass as gt
+import grp
 import logging
 import logging.handlers
 import os
@@ -36,9 +37,9 @@ try:
 
     HAVE_YARA = True
     if not int(yara.__version__[0]) >= 4:
-        raise ImportError("Missed library: pip3 install yara-python>=4.0.0 -U")
+        raise ImportError("Missed library: poetry run pip install yara-python>=4.0.0 -U")
 except ImportError:
-    print("Missed library: pip3 install yara-python>=4.0.0 -U")
+    print("Missed library: poetry run pip install yara-python>=4.0.0 -U")
     HAVE_YARA = False
 
 log = logging.getLogger()
@@ -47,6 +48,7 @@ cuckoo = Config()
 logconf = Config("logging")
 routing = Config("routing")
 repconf = Config("reporting")
+auxconf = Config("auxiliary")
 dist_conf = Config("distributed")
 
 
@@ -63,7 +65,7 @@ def check_user_permissions(as_root: bool = False):
     if as_root:
         log.warning("You running part of CAPE as non 'cape' user! That breaks permissions on temp folder and log folder.")
         return
-    if gt.getuser() != "cape":
+    if gt.getuser() != cuckoo.cuckoo.username:
         raise CuckooStartupError(
             f"Running as not 'cape' user breaks permissions! Run with cape user! Also fix permission on tmppath path: chown cape:cape {cuckoo.cuckoo.tmppath}\n log folder: chown cape:cape {os.path.join(CUCKOO_ROOT, 'logs')}"
         )
@@ -318,13 +320,13 @@ def init_yara():
                 break
             except yara.SyntaxError as e:
                 bad_rule = re.match(r"(.+)\(\d+\):", str(e))[1]
-                log.debug("Trying to delete bad rule: %s", bad_rule)
+                log.debug("Trying to disable rule: %s. Can't compile it. Ensure that your YARA is properly installed.", bad_rule)
                 if os.path.basename(bad_rule) in indexed:
                     for k, v in rules.items():
                         if v == bad_rule:
                             del rules[k]
                             indexed.remove(os.path.basename(bad_rule))
-                            print(f"Deleted broken yara rule: {bad_rule}")
+                            log.error("Can't compile YARA rule: %s. Maybe is bad yara but can be missing module.", bad_rule)
                             break
                 else:
                     break
@@ -520,3 +522,31 @@ def init_routing():
         if routing.routing.auto_rt:
             rooter("flush_rttable", routing.routing.rt_table)
             rooter("init_rttable", routing.routing.rt_table, routing.routing.internet)
+
+
+def check_tcpdump_permissions():
+
+    tcpdump = auxconf.sniffer.get("tcpdump", "/usr/sbin/tcpdump")
+
+    user = False
+    with suppress(Exception):
+        user = gt.getuser()
+
+    pcap_permissions_error = False
+    if user:
+        try:
+            if user not in grp.getgrnam("pcap").gr_mem:
+                pcap_permissions_error = True
+        except KeyError:
+            log.error("Group pcap does not exist.")
+            pcap_permissions_error = True
+
+    if pcap_permissions_error:
+        print(
+            f"""\nPcap generation wan't work till you fix the permission problems. Please run following command to fix it!
+            groupadd pcap
+            usermod -a -G pcap {user}
+            chgrp pcap {tcpdump}
+            setcap cap_net_raw,cap_net_admin=eip {tcpdump}
+            """
+        )

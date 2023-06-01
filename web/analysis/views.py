@@ -43,7 +43,7 @@ except ImportError:
     try:
         from ratelimit.decorators import ratelimit
     except ImportError:
-        print("missed dependency: pip3 install django-ratelimit -U")
+        print("missed dependency: poetry run pip install django-ratelimit -U")
 
 from lib.cuckoo.common.admin_utils import disable_user
 
@@ -64,7 +64,7 @@ try:
 
     HAVE_PYZIPPER = True
 except ImportError:
-    print("Missed dependency: pip3 install pyzipper -U")
+    print("Missed dependency: poetry run pip install pyzipper -U")
     HAVE_PYZIPPER = False
 
 TASK_LIMIT = 25
@@ -526,7 +526,7 @@ def _load_file(task_id, sha256, existen_details, name):
         filepath = os.path.join(CUCKOO_ROOT, "storage", "analyses", str(task_id), "bingraph", sha256 + "-ent.svg")
 
     elif name == "vba2graph":
-        filepath = os.path.join(CUCKOO_ROOT, "storage", "analyses", str(task_id), "vba2graph", sha256 + ".svg")
+        filepath = os.path.join(CUCKOO_ROOT, "storage", "analyses", str(task_id), "vba2graph", "svg", sha256 + ".svg")
 
     elif name == "debugger":
         debugger_log_path = os.path.join(CUCKOO_ROOT, "storage", "analyses", str(task_id), "debugger")
@@ -850,8 +850,6 @@ def filtered_chunk(request, task_id, pid, category, apilist, caller, tid):
         apis = apilist.split(",")
         apis[:] = [s.strip().lower() for s in apis if len(s.strip())]
 
-        tid = int(tid)
-
         # Populate dict, fetching data from all calls and selecting only appropriate category/APIs.
         for call in process["calls"]:
             if enabledconf["mongodb"]:
@@ -860,8 +858,8 @@ def filtered_chunk(request, task_id, pid, category, apilist, caller, tid):
                 chunk = es.search(index=get_calls_index(), body={"query": {"match": {"_id": call}}})["hits"]["hits"][0]["_source"]
             for call in chunk["calls"]:
                 # filter by call or tid
-                if caller != "null" or tid != 0:
-                    if call["caller"] == caller and call["thread_id"] == tid:
+                if caller != "null" or tid != "0":
+                    if (caller == "null" or call["caller"] == caller) and (tid == "0" or call["thread_id"] == tid):
                         filtered_process["calls"].append(call)
                 elif category in ("all", call["category"]):
                     if len(apis) > 0:
@@ -1461,7 +1459,7 @@ def report(request, task_id):
     if report.get("target", {}).get("file", {}):
         vba2graph = processing_cfg.vba2graph.enabled
         vba2graph_svg_path = os.path.join(
-            CUCKOO_ROOT, "storage", "analyses", str(task_id), "vba2graph", report["target"]["file"]["sha256"] + ".svg"
+            CUCKOO_ROOT, "storage", "analyses", str(task_id), "vba2graph", "svg", report["target"]["file"]["sha256"] + ".svg"
         )
 
         if path_exists(vba2graph_svg_path) and path_safe(vba2graph_svg_path):
@@ -1587,7 +1585,7 @@ def file_nl(request, category, task_id, dlfile):
 
     elif category == "vba2graph":
         file_name = f"{dlfile}.svg"
-        path = os.path.join(base_path, "vba2graph", file_name)
+        path = os.path.join(base_path, "vba2graph", "svg", file_name)
         cd = "image/svg+xml"
 
     else:
@@ -1727,9 +1725,12 @@ def file(request, category, task_id, dlfile):
     else:
         return render(request, "error.html", {"error": "Category not defined"})
 
-    send_filename = f"{task_id + '_' if task_id not in os.path.basename(path) else ''}{os.path.basename(path)}"
-    if category in zip_categories:
-        send_filename += ".zip"
+    if not isinstance(path, list):
+        send_filename = f"{task_id + '_' if task_id not in os.path.basename(path) else ''}{os.path.basename(path)}"
+        if category in zip_categories:
+            send_filename += ".zip"
+    else:
+        send_filename = file_name + ".zip"
 
     if not path:
         return render(
